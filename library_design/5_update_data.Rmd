@@ -1,0 +1,246 @@
+---
+title: "EGFR Prime Editing Library"
+subtitle: "Part 5: update table columns"
+author: 
+- name: Rick Farouni
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_notebook:
+    df_print: paged
+    code_folding: show
+    toc: no
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+---
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(TxDb.Hsapiens.UCSC.hg38.knownGene))
+suppressPackageStartupMessages(library(BSgenome.Hsapiens.UCSC.hg38))
+suppressPackageStartupMessages(library(org.Hs.eg.db))
+suppressPackageStartupMessages(library(VariantAnnotation))
+```
+
+
+
+
+```{r}
+output_dir <- "./output"
+variants_table_path <-
+  file.path(output_dir, "variants_table.tsv")
+db_path <- "./input"
+clinvar_EGFR_path <-
+  file.path(db_path, "variant_summary_GRCh38_EGFR.tsv")
+cosmic_path <-
+  file.path(db_path, "Cosmic_GenomeScreensMutant_v99_GRCh38_EGFR.tsv")
+```
+
+
+```{r}
+clinvar_hg38_EGFR <-
+  read_tsv(clinvar_EGFR_path) %>%
+  dplyr::select(VariationID, ClinicalSignificance)  %>% 
+  set_names(c(
+  "clinvar_id", "clinical_significance"
+  )) 
+clinvar_hg38_EGFR
+```
+
+
+
+
+```{r}
+variants_dt <-
+  read_tsv(variants_table_path)  %>%
+  separate(id, into=c("id1", "id2"), sep = ";", remove = F) %>%
+  mutate(id1c= if_else(grepl("COSV",id1), id1, ""),
+         id2c= if_else(grepl("COSV",id2), id2, ""))%>%
+  mutate(id1= if_else(grepl("^COSV|^g",id1), "", id1),
+         id2= if_else(grepl("^COSV|^g",id2) | is.na(id2), "", id2)) %>%
+  unite(col="clinvar_id", c("id1", "id2"), sep="") %>%
+  unite(col="cosmic_id", c("id1c", "id2c"), sep="") %>%
+  mutate(clinvar_id=as.numeric(clinvar_id))%>%
+  left_join(., clinvar_hg38_EGFR, by="clinvar_id") %>%
+  relocate(clinvar_id, .after=cosmic_id)
+```
+
+
+
+# Create Gene model for EGFR-201 (ENST00000275493.7)
+
+```{r}
+hg_genome <- BSgenome.Hsapiens.UCSC.hg38
+```
+
+```{r}
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+txdb <- keepSeqlevels(txdb, "chr7")
+```
+
+
+
+```{r}
+tx_lengths <-
+  transcriptLengths(txdb,
+    with.utr5_len = TRUE,
+    with.utr3_len = TRUE
+  )
+
+tx_lengths <-
+  tx_lengths %>%
+  dplyr::filter(gene_id == 1956) %>%
+  arrange(-nexon)
+tx_lengths
+```
+
+
+```{r}
+(tx_lengths$tx_len - (tx_lengths$utr5_len + tx_lengths$utr3_len)) / 3
+```
+
+### Get the cds parts, the introns, the 3UTR, and the 5UTR and combine
+
+
+```{r}
+cds_tx <- cdsBy(txdb, by = "tx", use.names = TRUE)
+cds_tx <- cds_tx["ENST00000275493.7"]
+
+intbytx <- intronsByTranscript(txdb, use.names = TRUE)
+intbytx <- intbytx["ENST00000275493.7"]
+
+
+five_utr <- fiveUTRsByTranscript(txdb, use.names = TRUE)$ENST00000275493.7
+three_utr <- threeUTRsByTranscript(txdb, use.names = TRUE)$ENST00000275493.7
+gene_model_gr <-
+  c(five_utr, cds_tx$ENST00000275493.7, intbytx$ENST00000275493.7, three_utr)
+gene_model_gr <- sort(gene_model_gr)
+id_col <- mcols(gene_model_gr)$cds_id
+id_col[1] <- "5utr_247279"
+id_col[57] <- "3utr_247330"
+id_col[seq(2, 56, 2)] <- paste0("cds", 1:28, "_", id_col[seq(2, 56, 2)])
+id_col[seq(3, 55, 2)] <- paste0("intron", 1:27)
+mcols(gene_model_gr) <- DataFrame(id = id_col)
+cds_seqs <- extractTranscriptSeqs(hg_genome, as(gene_model_gr, "GRangesList"))
+mcols(gene_model_gr)$seq <- cds_seqs
+gene_model_gr
+```
+
+
+```{r}
+loc_lens <-
+  tibble(loc = mcols(gene_model_gr)$id, loc_len = width(gene_model_gr))
+loc_lens
+```
+
+
+
+```{r}
+EGFR_seq <- extractTranscriptSeqs(hg_genome, cds_tx)
+EGFR_seq
+```
+
+```{r}
+EGFR_aa <- translate(EGFR_seq)
+EGFR_aa
+```
+
+
+```{r}
+cds_starts <- start(cds_tx)
+cds_ends <- end(cds_tx)
+cds_width <-
+  transcriptWidths(
+    exonStarts = cds_starts,
+    exonEnds = cds_ends
+  )
+ref_locs <- transcriptLocs2refLocs(list(c(1:cds_width)),
+  exonStarts = cds_starts,
+  exonEnds = cds_ends,
+  strand = c("+")
+)[[1]]
+ref_locs[1:10]
+```
+
+
+
+```{r}
+syn_variants_dt <-
+  variants_dt %>%
+  dplyr::select(name_syn, start_syn, ref_syn, alt_syn) %>%
+  filter(!is.na(name_syn)) %>%
+  group_by(name_syn)%>%
+  dplyr::slice(1) %>%
+  ungroup()
+syn_variants_dt
+```
+
+```{r}
+num_variants <- NROW(syn_variants_dt)
+  gr0 <-
+    GRanges(
+      Rle(c("chr7"), num_variants),
+      IRanges(
+        start = syn_variants_dt$start_syn,
+        end = syn_variants_dt$start_syn,
+        names = syn_variants_dt$name_syn
+      )
+    )
+
+var_allelles <- DNAStringSet(syn_variants_dt$alt_syn)
+# Predict consequence of variant
+predict_coding_variants <-
+  predictCoding(gr0, txdb, hg_genome, varAllele = var_allelles)
+predict_coding_variants <-
+  predict_coding_variants[mcols(predict_coding_variants)$TXID == 93502]
+
+predict_coding_variants <-
+  as_tibble(predict_coding_variants) %>%
+  add_column(name = names(predict_coding_variants)) %>%
+  dplyr::select(
+    name, PROTEINLOC, CDSLOC.start, REFCODON,
+    VARCODON, REFAA, VARAA, 
+  ) %>%
+  set_names(c(
+    "name_syn",  "pos_protein_syn", "pos_cds_syn", "ref_codon_syn",
+    "var_codon_syn", "ref_aa_syn", "var_aa_syn"
+  )) %>%
+  rowwise() %>%
+  mutate(pos_protein_syn = str_c(pos_protein_syn, collapse = ":")) 
+
+syn_variants_dt <- 
+  left_join(syn_variants_dt, predict_coding_variants, by="name_syn")
+
+syn_variants_dt
+```
+```{r}
+variants_dt<-
+  left_join(variants_dt, syn_variants_dt %>%
+  dplyr::select(-c(start_syn:alt_syn)), by="name_syn")
+```
+
+```{r}
+variants_dt %>%
+  dplyr::select(name, pos_protein, pos_protein_syn) %>%
+  filter(!is.na(pos_protein_syn)) %>%
+  mutate(diff= as.numeric(pos_protein)- as.numeric(pos_protein_syn)) %>%
+  group_by(diff)%>%
+  tally()
+```
+
+
+### Save to files
+
+```{r}
+variants_table_extracols_path <-
+  file.path(output_dir, "variants_table_extracols.tsv")
+
+write_tsv(
+  variants_dt, variants_table_extracols_path)
+```
+
+
+
+```{r}
+sessionInfo()
+```

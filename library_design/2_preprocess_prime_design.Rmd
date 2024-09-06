@@ -1,0 +1,465 @@
+---
+title: "EGFR Prime Editing Library"
+subtitle: "Part 2: Create input sequences for primeDesign"
+author: 
+- name: Rick Farouni
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_notebook:
+    df_print: paged
+    code_folding: show
+    toc: no
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+---
+
+
+## Load libraries and set filepaths 
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(TxDb.Hsapiens.UCSC.hg38.knownGene))
+suppressPackageStartupMessages(library(BSgenome.Hsapiens.UCSC.hg38))
+suppressPackageStartupMessages(library(org.Hs.eg.db))
+```
+
+
+```{r}
+output_dir <- "./output"
+
+variants_table_filepath <-
+  file.path(output_dir, "variants_table.tsv")
+
+all_variants_paired_filepath <-
+  file.path(output_dir, "all_variants_paired.tsv")
+
+variants_prime_design_filepath <-
+  file.path(output_dir, "variants_prime_design.txt")
+```
+
+
+
+## Define functions
+
+
+```{r}
+get_target_seq <- function(i) {
+  out_dt <- variants_dt[i, ]
+  seq <- out_dt$seq
+  start <- out_dt$start
+  end <- out_dt$stop
+  start_flank <- out_dt$start_flank
+  ref <- unname(out_dt$ref)
+  alt <- unname(out_dt$alt)
+  type <- out_dt$type
+  str_len <- str_length(seq)
+  mod_start <- start - start_flank + 1
+
+  if (type %in% c("snv", "indel")) {
+    mod_end <- end - start_flank + 1
+    left_flank <- str_sub(seq, 1, mod_start - 1)
+    wt_bases <- str_sub(seq, mod_start, mod_end)
+    if (identical(wt_bases, ref)) {
+      right_flank <- str_sub(seq, mod_end + 1, str_len)
+      mod_pattern_snv <- paste0("(", ref, "/", alt, ")")
+      mod_seq <- paste0(left_flank, mod_pattern_snv, right_flank)
+    } else {
+      stop(paste0("Error: the extracted and provided sequences are not identical 1. row: ", i))
+    }
+  } else if (type == c("del")) {
+    mod_end <- end - start_flank + 1
+    left_flank <- str_sub(seq, 1, mod_start - 1)
+    wt_bases <- str_sub(seq, mod_start, mod_end)
+    if (identical(wt_bases, ref)) {
+      right_flank <- str_sub(seq, mod_end + 1, str_len)
+      mod_pattern_del <- paste0("(-", wt_bases, ")")
+      mod_seq <- paste0(left_flank, mod_pattern_del, right_flank)
+    } else {
+      stop(paste0("Error: the extracted and provided sequences are not identical 2. row: ", i))
+    }
+  } else if (type == c("ins")) {
+    mod_end <- end - start_flank + 1
+    left_flank <- str_sub(seq, 1, mod_start)
+    right_flank <- str_sub(seq, mod_end + 1, str_len)
+    mod_pattern_insert <- paste0("(+", str_sub(alt, 2), ")")
+    mod_seq <- paste0(left_flank, mod_pattern_insert, right_flank)
+  }
+
+  return(mod_seq)
+}
+
+
+get_syn_seq <- function(i) {
+  out_dt <- variants_dt[i, ]
+  seq <- out_dt$seq
+  start_syn <- out_dt$start_syn
+  end_syn <- start_syn
+  start_flank <- out_dt$start_flank
+  ref_syn <- unname(out_dt$ref_syn)
+  alt_syn <- unname(out_dt$alt_syn)
+  str_len <- str_length(seq)
+  mod_start <- start_syn - start_flank + 1
+
+  if (!is.na(start_syn)) {
+    mod_end <- end_syn - start_flank + 1
+    left_flank <- str_sub(seq, 1, mod_start - 1)
+    wt_bases <- str_sub(seq, mod_start, mod_end)
+    if (identical(wt_bases, ref_syn)) {
+      right_flank <- str_sub(seq, mod_end + 1, str_len)
+      mod_pattern_snv <- paste0("(", ref_syn, "/", alt_syn, ")")
+      mod_seq <- paste0(left_flank, mod_pattern_snv, right_flank)
+    } else {
+      stop(paste0("Error:
+                  the extracted and provided sequences are not identical 1. row: ", i))
+    }
+  } else {
+    mod_seq <- NA
+  }
+  return(mod_seq)
+}
+
+
+get_target_syn_seq <- function(i) {
+  out_dt <- variants_dt[i, ]
+  seq <- out_dt$seq
+  start_syn <- out_dt$start_syn
+  start <- out_dt$start
+  start_flank <- out_dt$start_flank
+  ref_syn <- unname(out_dt$ref_syn)
+  alt_syn <- unname(out_dt$alt_syn)
+  ref <- unname(out_dt$ref)
+  alt <- unname(out_dt$alt)
+  str_len <- str_length(seq)
+
+
+  if (!is.na(start_syn)) {
+    if (start > start_syn) {
+      mod_1 <- start_syn - start_flank + 1
+      mod_2 <- start - start_flank + 1
+      ref_1 <- ref_syn
+      alt_1 <- alt_syn
+      ref_2 <- ref
+      alt_2 <- alt
+    } else if (start < start_syn) {
+      mod_2 <- start_syn - start_flank + 1
+      mod_1 <- start - start_flank + 1
+      ref_2 <- ref_syn
+      alt_2 <- alt_syn
+      ref_1 <- ref
+      alt_1 <- alt
+    }
+
+    left_flank <- str_sub(seq, 1, mod_1 - 1)
+    var_1 <- str_sub(seq, mod_1, mod_1)
+    gap_flank <- str_sub(seq, mod_1 + 1, mod_2 - 1)
+    var_2 <- str_sub(seq, mod_2, mod_2)
+    right_flank <- str_sub(seq, mod_2 + 1, str_len)
+    var_1_mod <- paste0("(", ref_1, "/", alt_1, ")")
+    var_2_mod <- paste0("(", ref_2, "/", alt_2, ")")
+
+    if (identical(var_1, ref_1) & identical(var_2, ref_2)) {
+      mod_seq <-
+        paste0(
+          left_flank,
+          var_1_mod,
+          gap_flank,
+          var_2_mod,
+          right_flank
+        )
+    } else {
+      stop(paste0("Error:
+                  the extracted and provided sequences are not identical 1. row: ", i))
+    }
+  } else {
+    mod_seq <- NA
+  }
+  return(mod_seq)
+}
+```
+
+## Create Gene model for EGFR-201 (ENST00000275493.7)
+
+```{r}
+hg_genome <- BSgenome.Hsapiens.UCSC.hg38
+```
+
+```{r}
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+txdb <- keepSeqlevels(txdb, "chr7")
+```
+
+
+```{r}
+tx_lengths <-
+  transcriptLengths(txdb,
+    with.utr5_len = TRUE,
+    with.utr3_len = TRUE
+  )
+
+tx_lengths <-
+  tx_lengths %>%
+  dplyr::filter(gene_id == 1956) %>%
+  arrange(-nexon)
+tx_lengths
+```
+
+
+```{r}
+(tx_lengths$tx_len - (tx_lengths$utr5_len + tx_lengths$utr3_len)) / 3
+```
+
+### Get the cds parts, the introns, the 3UTR, and the 5UTR and combine
+
+
+```{r}
+cds_tx <- cdsBy(txdb, by = "tx", use.names = TRUE)
+cds_tx <- cds_tx["ENST00000275493.7"]
+
+intbytx <- intronsByTranscript(txdb, use.names = TRUE)
+intbytx <- intbytx["ENST00000275493.7"]
+
+
+five_utr <- fiveUTRsByTranscript(txdb, use.names = TRUE)$ENST00000275493.7
+three_utr <- threeUTRsByTranscript(txdb, use.names = TRUE)$ENST00000275493.7
+gene_model_gr <-
+  c(five_utr, cds_tx$ENST00000275493.7, intbytx$ENST00000275493.7, three_utr)
+gene_model_gr <- sort(gene_model_gr)
+id_col <- mcols(gene_model_gr)$cds_id
+id_col[1] <- "5utr_247279"
+id_col[57] <- "3utr_247330"
+id_col[seq(2, 56, 2)] <- paste0("cds", 1:28, "_", id_col[seq(2, 56, 2)])
+id_col[seq(3, 55, 2)] <- paste0("intron", 1:27)
+mcols(gene_model_gr) <- DataFrame(id = id_col)
+cds_seqs <- extractTranscriptSeqs(hg_genome, as(gene_model_gr, "GRangesList"))
+mcols(gene_model_gr)$seq <- cds_seqs
+gene_model_gr
+```
+
+
+
+```{r}
+cds_starts <- start(cds_tx)
+cds_ends <- end(cds_tx)
+cds_width <-
+  transcriptWidths(
+    exonStarts = cds_starts,
+    exonEnds = cds_ends
+  )
+ref_locs <-
+  transcriptLocs2refLocs(list(c(1:cds_width)),
+    exonStarts = cds_starts,
+    exonEnds = cds_ends,
+    strand = c("+")
+  )[[1]]
+ref_locs[1:10]
+```
+
+
+## Load data 
+
+
+```{r}
+variants_dt <-
+  read_tsv(variants_table_filepath)
+variants_dt
+```
+
+
+## Create in-frame flanking sequence region for PrimeDesign
+
+```{r}
+get_seq <- function(start, end) {
+  seq <- as.character(subseq(hg_genome[["chr7"]], start, end))
+  return(seq)
+}
+
+width_left_flank <- 48
+width_right_flank <- 47
+
+tx_start <- start(gene_model_gr)[1]
+tx_end <- end(gene_model_gr)[length(gene_model_gr)]
+
+loc_pos_in_codon_map <-
+  tibble(
+    start = ref_locs,
+    pos_in_codon = rep(1:3, cds_width / 3)
+  ) %>%
+  mutate(
+    start_flank = start - (width_left_flank + pos_in_codon - 1),
+    end_flank = start + (width_right_flank - pos_in_codon + 1)
+  )
+
+
+loc_pos_in_codon_map <-
+  loc_pos_in_codon_map %>%
+  mutate(seq = map2_chr(start_flank, end_flank, get_seq))
+
+loc_pos_in_codon_map2 <-
+  tibble(start = seq(tx_start, tx_end), pos_in_codon = 1) %>%
+  mutate(
+    start_flank = start - (width_left_flank + pos_in_codon - 1),
+    end_flank = start + (width_right_flank - pos_in_codon + 1)
+  ) %>%
+  mutate(seq = map2_chr(start_flank, end_flank, get_seq))
+
+loc_pos_in_codon_map2 <-
+  loc_pos_in_codon_map2 %>%
+  filter(!(start %in% loc_pos_in_codon_map$start))
+
+loc_pos_in_codon_map <-
+  bind_rows(loc_pos_in_codon_map, loc_pos_in_codon_map2)
+rm(loc_pos_in_codon_map2)
+
+loc_pos_in_codon_map
+```
+
+
+```{r}
+variants_dt <-
+  left_join(variants_dt,
+    loc_pos_in_codon_map,
+    by = "start"
+  )
+variants_dt
+```
+
+
+```{r}
+variants_dt <-
+  variants_dt %>%
+  mutate(n_row = row_number()) %>%
+  rowwise() %>%
+  mutate(
+    target_seq = get_target_seq(n_row),
+    syn_seq = get_syn_seq(n_row),
+    target_syn_seq = get_target_syn_seq(n_row)
+  ) %>%
+  dplyr::select(-n_row)
+variants_dt
+```
+
+
+
+### Split variants into target, target_syn, and syn
+
+```{r}
+target_variants <-
+  variants_dt %>%
+  dplyr::select(name, target_seq) %>%
+  set_names(c("target_name", "target_sequence"))
+target_variants
+```
+
+
+```{r}
+variants_snv <-
+  variants_dt %>%
+  filter(!is.na(name_syn))
+
+target_syn_variants <-
+  variants_snv %>%
+  dplyr::select(name_target_syn, target_syn_seq) %>%
+  set_names(c("target_name", "target_sequence"))
+
+syn_variants <-
+  variants_snv %>%
+  dplyr::select(name_syn, syn_seq) %>%
+  set_names(c("target_name", "target_sequence")) %>%
+  group_by(target_name) %>%
+  dplyr::slice(1) %>%
+  filter(!(target_name %in% target_variants$target_name))
+syn_variants
+```
+
+
+```{r}
+input_variants <-
+  bind_rows(target_variants,
+            target_syn_variants, 
+            syn_variants)
+input_variants
+```
+
+
+
+```{r}
+all_variants_paired <-
+  read_tsv(all_variants_paired_filepath)
+
+all_variants_paired <-
+  left_join(all_variants_paired,
+    input_variants,
+    by = "target_name"
+  ) %>%
+  relocate(target_sequence, .after=target_name) %>%
+  mutate(group= case_when(
+    is.na(name_target) & is.na(num_targets) ~ "target",
+    is.na(name_target) & !is.na(num_targets) ~ "target_and_syn",
+     is.na(name_target_syn) & !is.na(name_target) ~ "target_syn",
+     is.na(name_syn) & !is.na(name_target) ~ "syn"
+
+  ))
+
+all_variants_paired
+```
+```{r}
+table(all_variants_paired$group)
+```
+
+
+
+### Save to file
+
+```{r}
+write_tsv(
+  variants_dt,
+  variants_table_filepath
+)
+
+write_tsv(
+  input_variants,
+  variants_prime_design_filepath
+)
+
+write_tsv(
+  all_variants_paired,
+  all_variants_paired_filepath
+)
+```
+
+### Code for running primeDesign
+
+```{bash eval=FALSE, include=TRUE}
+#!/bin/bash
+
+# Define two lists of numbers
+rtt_length=(18 18 18 24 24 24)
+pbs_length=(11 13 15 11 13 15)
+
+# Check if the lists have the same length
+if [ ${#rtt_length[@]} -ne ${#pbs_length[@]} ]; then
+    echo "Error: Lists have different lengths"
+    exit 1
+fi
+
+   dir_path="./prime_design_output"
+    
+    mkdir ${dir_path}
+
+# Iterate over the indices of the lists
+for ((i=0; i<${#rtt_length[@]}; i++)); do
+
+    # Print the combined value
+    echo "Dir Path $dir_path"
+    echo "RTT Length is ${rtt_length[$i]} and the PBS length is ${pbs_length[$i]}"
+    
+    docker run -v ${PWD}/:/DATA -w /DATA pinellolab/primedesign primedesign_cli  -f ./variants_prime_design.txt -out ${dir_path} -silent_mut -n_pegrnas 6 -pbs ${pbs_length[$i]} -rtt ${rtt_length[$i]} 
+
+done
+```
+
+
+```{r}
+sessionInfo()
+```

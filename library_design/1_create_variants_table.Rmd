@@ -1,0 +1,1239 @@
+---
+title: "EGFR Prime Editing Library"
+subtitle: "Part 1: Combine Variants and Create Table"
+author: 
+- name: Rick Farouni
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_notebook:
+    df_print: paged
+    code_folding: show
+    toc: no
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+---
+
+
+
+# Load libraries and set filepaths 
+
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(TxDb.Hsapiens.UCSC.hg38.knownGene))
+suppressPackageStartupMessages(library(BSgenome.Hsapiens.UCSC.hg38))
+suppressPackageStartupMessages(library(org.Hs.eg.db))
+suppressPackageStartupMessages(library(VariantAnnotation))
+```
+
+
+```{r}
+db_path <- "./input"
+output_dir <- "./output"
+# ftp_path <- "ftp://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz"
+
+clinvar_EGFR_path <-
+  file.path(db_path, "variant_summary_GRCh38_EGFR.tsv")
+
+cosmic_path <-
+  file.path(db_path, "Cosmic_GenomeScreensMutant_v99_GRCh38_EGFR.tsv")
+
+ABE8e_path <-
+  file.path(db_path, "sgrna_designs_ABE8e.csv")
+BE4max_path <-
+  file.path(db_path, "sgrna_designs_BE4max.csv")
+syn_codon_path <-
+  file.path(db_path, "syn_codons.txt")
+
+variants_table_path <-
+  file.path(output_dir, "variants_table.tsv")
+
+all_variants_paired_path <-  
+  file.path(output_dir, "all_variants_paired.tsv")
+```
+
+## Extract clinvar data and save to file for later processing
+
+```{r}
+# # run once
+# clinvar_all_path <-
+#   file.path(db_path, "variant_summary.txt.gz")
+#
+#
+# clinvar_all <- read_tsv(gzfile(clinvar_all_path))
+#
+# clinvar_EGFR <-
+#   clinvar_all %>%
+#   filter(GeneSymbol == "EGFR" &
+#     Assembly == "GRCh38" &
+#     !(Type %in% c("Microsatellite", "Inversion")) &
+#     Start >= 55019017)
+# write_tsv(clinvar_EGFR, clinvar_EGFR_path)
+```
+
+# Create Gene model for EGFR-201 (ENST00000275493.7)
+
+```{r}
+hg_genome <- BSgenome.Hsapiens.UCSC.hg38
+```
+
+```{r}
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+txdb <- keepSeqlevels(txdb, "chr7")
+```
+
+
+
+```{r}
+tx_lengths <-
+  transcriptLengths(txdb,
+    with.utr5_len = TRUE,
+    with.utr3_len = TRUE
+  )
+
+tx_lengths <-
+  tx_lengths %>%
+  dplyr::filter(gene_id == 1956) %>%
+  arrange(-nexon)
+tx_lengths
+```
+
+
+```{r}
+(tx_lengths$tx_len - (tx_lengths$utr5_len + tx_lengths$utr3_len)) / 3
+```
+
+### Get the cds parts, the introns, the 3UTR, and the 5UTR and combine
+
+
+```{r}
+cds_tx <- cdsBy(txdb, by = "tx", use.names = TRUE)
+cds_tx <- cds_tx["ENST00000275493.7"]
+
+intbytx <- intronsByTranscript(txdb, use.names = TRUE)
+intbytx <- intbytx["ENST00000275493.7"]
+
+
+five_utr <- fiveUTRsByTranscript(txdb, use.names = TRUE)$ENST00000275493.7
+three_utr <- threeUTRsByTranscript(txdb, use.names = TRUE)$ENST00000275493.7
+gene_model_gr <-
+  c(five_utr, cds_tx$ENST00000275493.7, intbytx$ENST00000275493.7, three_utr)
+gene_model_gr <- sort(gene_model_gr)
+id_col <- mcols(gene_model_gr)$cds_id
+id_col[1] <- "5utr_247279"
+id_col[57] <- "3utr_247330"
+id_col[seq(2, 56, 2)] <- paste0("cds", 1:28, "_", id_col[seq(2, 56, 2)])
+id_col[seq(3, 55, 2)] <- paste0("intron", 1:27)
+mcols(gene_model_gr) <- DataFrame(id = id_col)
+cds_seqs <- extractTranscriptSeqs(hg_genome, as(gene_model_gr, "GRangesList"))
+mcols(gene_model_gr)$seq <- cds_seqs
+gene_model_gr
+```
+
+
+```{r}
+loc_lens <-
+  tibble(loc = mcols(gene_model_gr)$id, loc_len = width(gene_model_gr))
+loc_lens
+```
+
+
+
+```{r}
+EGFR_seq <- extractTranscriptSeqs(hg_genome, cds_tx)
+EGFR_seq
+```
+
+```{r}
+EGFR_aa <- translate(EGFR_seq)
+EGFR_aa
+```
+
+
+```{r}
+cds_starts <- start(cds_tx)
+cds_ends <- end(cds_tx)
+cds_width <-
+  transcriptWidths(
+    exonStarts = cds_starts,
+    exonEnds = cds_ends
+  )
+ref_locs <- transcriptLocs2refLocs(list(c(1:cds_width)),
+  exonStarts = cds_starts,
+  exonEnds = cds_ends,
+  strand = c("+")
+)[[1]]
+ref_locs[1:10]
+```
+
+
+# Load, combine, and filter variant data
+
+## Load clinvar data
+
+```{r}
+clinvar_hg38_EGFR <-
+  read_tsv(clinvar_EGFR_path)
+
+clinvar_hg38_EGFR <-
+  clinvar_hg38_EGFR %>%
+  dplyr::select(
+    -GeneID, -GeneSymbol, -HGNC_ID, -`nsv/esv (dbVar)`,
+    -Assembly, -ChromosomeAccession, -ReferenceAllele,
+    -AlternateAllele, -Cytogenetic
+  ) %>%
+  mutate(var_len = pmax(
+    str_length(ReferenceAlleleVCF),
+    str_length(AlternateAlleleVCF)
+  )) %>%
+  filter(var_len <= 10) %>%
+  arrange(PositionVCF)
+
+# only keep main transcript variants
+clinvar_hg38_EGFR <-
+  clinvar_hg38_EGFR %>%
+  filter(Name != "NM_001346941.2(EGFR):c.89-4536_89-4529del")
+clinvar_hg38_EGFR
+```
+
+
+
+
+```{r}
+clinvar_hg38_EGFR_renamed <-
+  clinvar_hg38_EGFR %>%
+  dplyr::select(
+    Name, Start, Stop,
+    ReferenceAlleleVCF,
+    AlternateAlleleVCF,
+    VariationID
+  ) %>%
+  set_names(c(
+    "name", "start", "stop",
+    "ref", "alt", "clinvar_id"
+  )) %>%
+  mutate(name = str_replace(
+    name, "NM_005228.5\\(EGFR\\):",
+    paste0("g", start, "_")
+  )) %>%
+  mutate(clinvar_id = as.character(clinvar_id))
+clinvar_hg38_EGFR_renamed
+```
+
+```{r}
+clinvar_hg38_EGFR_not_snv <-
+  clinvar_hg38_EGFR_renamed %>%
+  filter(!(str_length(ref) == 1 &
+    str_length(alt) == 1)) %>%
+  mutate(type = case_when(
+    (str_length(ref) == str_length(alt) &
+      str_length(ref) == 1) ~ "snv",
+    (str_sub(ref, 1, 1) == alt &
+      str_length(alt) < str_length(ref)) ~ "del",
+    (str_sub(alt, 1, 1) == ref &
+      str_length(ref) == 1 &
+      str_length(alt) > 1) ~ "ins",
+    TRUE ~ "indel"
+  )) %>%
+  mutate(stop = if_else(type == "ins", stop - 1, stop)) %>%
+  mutate(
+    alt = if_else(type == "del", "", alt),
+    ref = if_else(type == "del", str_sub(ref, 2), ref)
+  ) %>%
+  rename(clinvar_id = "id") %>%
+  relocate(type, .after = "name")
+clinvar_hg38_EGFR_not_snv
+```
+
+```{r}
+clinvar_hg38_EGFR_snv <-
+  clinvar_hg38_EGFR_renamed %>%
+  filter((str_length(ref) == 1 & str_length(alt) == 1))
+clinvar_hg38_EGFR_snv
+```
+
+## Load COSMIC data
+
+
+
+```{r}
+cosmic_dt <-
+  read_tsv(cosmic_path)
+
+cosmic_dt <-
+  cosmic_dt %>%
+  filter(TRANSCRIPT_ACCESSION == "ENST00000275493.6") %>%
+  group_by(GENOMIC_MUTATION_ID) %>%
+  dplyr::slice(1) %>%
+  ungroup()
+
+cosmic_dt_subset <-
+  cosmic_dt %>%
+  dplyr::select(
+    MUTATION_CDS, MUTATION_AA,
+    GENOME_START, GENOME_STOP,
+    GENOMIC_WT_ALLELE, GENOMIC_MUT_ALLELE,
+    GENOMIC_MUTATION_ID, MUTATION_DESCRIPTION
+  ) %>%
+  mutate(MUTATION_AA = str_replace(MUTATION_AA, "p.\\?", "")) %>%
+  mutate(name = if_else(MUTATION_AA == "",
+    paste0("g", GENOME_START, "_", MUTATION_CDS),
+    paste0("g", GENOME_START, "_", MUTATION_CDS, " (", MUTATION_AA, ")")
+  )) %>%
+  dplyr::select(
+    name, GENOME_START, GENOME_STOP,
+    GENOMIC_WT_ALLELE, GENOMIC_MUT_ALLELE,
+    GENOMIC_MUTATION_ID
+  ) %>%
+  set_names(c("name", "start", "stop", "ref", "alt", "cosmic_id")) %>%
+  mutate(
+    ref = if_else(is.na(ref), "", ref),
+    alt = if_else(is.na(alt), "", alt)
+  ) %>%
+  mutate(var_len = pmax(str_length(ref), str_length(alt))) %>%
+  filter(var_len <= 10) %>%
+  dplyr::select(-var_len) %>%
+  arrange(start)
+
+
+
+cosmic_dt_subset_snv <-
+  cosmic_dt_subset %>%
+  filter(str_length(ref) == 1 & str_length(alt) == 1)
+
+cosmic_dt_subset_not_snv <-
+  cosmic_dt_subset %>%
+  filter(!(str_length(ref) == 1 & str_length(alt) == 1))
+
+cosmic_dt_subset_snv
+```
+
+
+```{r}
+cosmic_dt_subset_not_snv <-
+  cosmic_dt_subset_not_snv %>%
+  mutate(type = case_when(
+    (str_length(ref) == str_length(alt) & str_length(ref) == 1) ~ "snv",
+    (str_length(ref) >= 1 & str_length(alt) == 0) ~ "del",
+    (str_length(ref) == 0 & str_length(alt) >= 1) ~ "ins",
+    TRUE ~ "indel"
+  )) %>%
+  relocate(type, .after = name)
+
+
+cosmic_dt_subset_not_snv <-
+  cosmic_dt_subset_not_snv %>%
+  mutate(extra_base = map_chr(
+    cosmic_dt_subset_not_snv$start,
+    ~ as.character(subseq(hg_genome[["chr7"]], ., .))
+  )) %>%
+  mutate(
+    stop = if_else(type == "ins", stop - 1, stop),
+    ref = if_else(type == "ins", extra_base, ref),
+    alt = if_else(type == "ins", paste0(extra_base, alt), alt)
+  ) %>%
+  dplyr::select(-extra_base)
+cosmic_dt_subset_not_snv
+```
+
+```{r}
+snv_dt <-
+  full_join(cosmic_dt_subset_snv,
+    clinvar_hg38_EGFR_snv,
+    by = c("start", "stop", "ref", "alt")
+  ) %>%
+  mutate(name = if_else(is.na(name.x), name.y, name.x)) %>%
+  dplyr::select(
+    name, start, stop,
+    ref, alt, cosmic_id,
+    clinvar_id
+  ) %>%
+  arrange(start) %>%
+  mutate(name = gsub("_c\\.\\d+[+-]?\\d+([[:alpha:]])>", "_\\1>", name))
+snv_dt
+```
+
+
+## Load variants from base editor experiments
+
+```{r}
+ABE8e_all_dt <- read_csv(ABE8e_path)
+BE4max_all_dt <- read_csv(BE4max_path)
+ABE8e_dt <- ABE8e_all_dt %>%
+  dplyr::select(c(14, 15, 17, 20, 27))
+BE4max_dt <- BE4max_all_dt %>%
+  dplyr::select(c(14, 15, 17, 20, 27))
+base_editor_variants <-
+  bind_rows(BE4max_dt, ABE8e_dt) %>%
+  dplyr::filter(Mutation.category_simplified %in%
+    c("Nonsense", "Missense", "Splice-acceptor", "Splice-donor"))
+base_editor_variants <-
+  base_editor_variants %>%
+  separate_rows(Nucleotide.edits, sep = "C_") %>%
+  separate_rows(Nucleotide.edits, sep = "A_") %>%
+  separate_rows(Nucleotide.edits, sep = "_") %>%
+  separate_rows(Nucleotide.edits, sep = ";") %>%
+  dplyr::filter(Nucleotide.edits != "") %>%
+  mutate(Nucleotide.edits = as.integer(Nucleotide.edits)) %>%
+  mutate(start = if_else(sgRNA.Strand == "sense",
+    sgrna.genomic.position + (Nucleotide.edits - 1),
+    sgrna.genomic.position - (Nucleotide.edits - 1)
+  )) %>%
+  mutate(
+    edit =
+      case_when(
+        Edit == "C-T" & sgRNA.Strand == "antisense" ~ "G-A",
+        Edit == "A-G" & sgRNA.Strand == "antisense" ~ "T-C",
+        TRUE ~ Edit
+      )
+  ) %>%
+  dplyr::select(start, edit) %>%
+  group_by(start) %>%
+  dplyr::slice(1) %>%
+  tidyr::separate(edit,
+    into = c("ref", "alt"), sep = "-"
+  ) %>%
+  mutate(
+    stop = start,
+    name = paste0("g", start, "_", ref, ">", alt)
+  ) %>%
+  dplyr::select(c("name", "start", "stop", "ref", "alt"))
+base_editor_variants
+```
+
+
+### Combine variants data
+
+```{r}
+snv_dt <-
+  full_join(snv_dt,
+    base_editor_variants,
+    by = c("start", "stop", "ref", "alt")
+  )
+
+snv_dt <-
+  snv_dt %>%
+  mutate(name = if_else(is.na(name.x), name.y, name.x)) %>%
+  rename(name.y = "be_id") %>%
+  dplyr::select(
+    name, start, stop, ref,
+    alt, cosmic_id, clinvar_id, be_id
+  ) %>%
+  unite("id", cosmic_id:be_id, sep = ";", na.rm = TRUE) %>%
+  arrange(start) %>%
+  mutate(type = "snv")
+snv_dt
+```
+
+
+```{r}
+non_snv_dt <-
+  full_join(clinvar_hg38_EGFR_not_snv,
+    cosmic_dt_subset_not_snv,
+    by = c("start", "stop", "ref", "alt", "type")
+  ) %>%
+  mutate(name = if_else(is.na(name.x), name.y, name.x)) %>%
+  dplyr::select(
+    name, type, start, stop,
+    ref, alt, cosmic_id,
+    id
+  ) %>%
+  arrange(start) %>%
+  unite("id", cosmic_id:id, sep = ";", na.rm = TRUE)
+non_snv_dt
+```
+
+
+```{r}
+variants_dt <-
+  bind_rows(
+    snv_dt,
+    non_snv_dt
+  ) %>%
+  arrange(start) %>%
+  mutate(name = sub(" \\(p\\..*$", "", name))
+
+variants_dt
+```
+
+
+
+
+## Annotate Variants
+
+
+```{r}
+annotate_and_predict_variants <- function(variants_dt) {
+  seq_len_min <- 49
+
+  num_variants <- NROW(variants_dt)
+  gr0 <-
+    GRanges(
+      Rle(c("chr7"), num_variants),
+      IRanges(
+        start = variants_dt$start,
+        end = variants_dt$stop,
+        names = variants_dt$name
+      )
+    )
+
+  var_allelles <- DNAStringSet(variants_dt$alt)
+
+  intron_locations <-
+    locateVariants(gr0,
+      intbytx,
+      IntronVariants(),
+      varAllele = var_allelles
+    )
+  # Locate intronic variants
+  intron_locations <-
+    intron_locations %>%
+    as_tibble() %>%
+    add_column(name = names(intron_locations)) %>%
+    relocate(name, .before = "seqnames") %>%
+    dplyr::select(-PRECEDEID, -FOLLOWID, -TXID)
+
+  # Locate remaining variants
+  all <- locateVariants(gr0,
+    txdb,
+    AllVariants(),
+    varAllele = var_allelles
+  )
+  all <-
+    all %>%
+    as_tibble() %>%
+    add_column(name = names(all)) %>%
+    relocate(name, .before = "seqnames") %>%
+    dplyr::select(-PRECEDEID, -FOLLOWID)
+
+  # Flag intronic and 5UTR variants that have alternative 
+  # effects given other potential spliced transcripts
+
+  transcript_splice_sites <-
+    all %>%
+    dplyr::filter(LOCATION == "spliceSite" & TXID == "93502")
+
+  intron_locations <-
+    intron_locations %>%
+    filter(!(name %in% transcript_splice_sites$name))
+
+  uncertain_introns <-
+    all %>%
+    dplyr::filter(name %in% intron_locations$name) %>%
+    group_by(name, LOCATION) %>%
+    dplyr::slice(1) %>%
+    ungroup() %>%
+    group_by(name) %>%
+    mutate(frac_intron = sum(LOCATION == "intron") / n()) %>%
+    dplyr::filter(frac_intron < 1) %>%
+    dplyr::filter(LOCATION != "intron") %>%
+    dplyr::filter(TXID != 93502) %>%
+    arrange(QUERYID) %>%
+    dplyr::select(-GENEID, -frac_intron) %>%
+    ungroup()
+
+  flag_variants <-
+    uncertain_introns %>%
+    dplyr::select(name, LOCATION, TXID) %>%
+    left_join(., tx_lengths %>%
+      dplyr::select(tx_id, tx_name) %>%
+      mutate(tx_id = as.character(tx_id)) %>%
+      dplyr::rename(TXID = "tx_id"),
+    by = "TXID"
+    ) %>%
+    dplyr::select(-TXID) %>%
+    unite("alt_effect", LOCATION:tx_name)
+
+
+  all <-
+    all %>%
+    dplyr::filter(TXID == 93502) %>%
+    dplyr::select(-TXID)
+
+  potential_promoters <-
+    all[which(duplicated(all$name)), ] %>%
+    dplyr::select(name) %>%
+    mutate(alt_effect = "promoter_ENST00000275493.7")
+
+  flag_variants <-
+    bind_rows(flag_variants, potential_promoters)
+
+  flag_variants <-
+    flag_variants %>%
+    group_by(name) %>%
+    dplyr::slice(1) %>%
+    ungroup()
+
+
+  all <-
+    all %>%
+    dplyr::filter(!duplicated(all$name))
+
+
+  all <-
+    bind_rows(
+      all,
+      intron_locations
+    )
+
+  all <-
+    left_join(all, flag_variants, by = "name") %>%
+    dplyr::select(-GENEID)
+
+
+  all <-
+    all %>%
+    dplyr::select(-c(LOCSTART:CDSID))
+
+  gene_model_gr_list <-
+    as(gene_model_gr, "GRangesList")
+
+  names(gene_model_gr_list) <- mcols(gene_model_gr)$id
+
+  map_grs <-
+    mapToTranscripts(resize(gr0, 1), gene_model_gr_list)
+
+  map_dt <-
+    map_grs %>%
+    as_tibble() %>%
+    mutate(name = names(map_grs)) %>%
+    dplyr::select(name, seqnames, start) %>%
+    set_names(c("name", "loc", "loc_start")) %>%
+    left_join(., loc_lens, by = "loc")
+
+  all <-
+    left_join(all,
+      map_dt,
+      by = "name"
+    )
+
+  # Predict consequence of variant
+  predict_coding_variants <-
+    predictCoding(gr0, txdb, hg_genome, varAllele = var_allelles)
+  predict_coding_variants <-
+    predict_coding_variants[mcols(predict_coding_variants)$TXID == 93502]
+  predict_coding_variants <-
+    as_tibble(predict_coding_variants) %>%
+    add_column(name = names(predict_coding_variants)) %>%
+    dplyr::select(
+      name, CDSLOC.start, CONSEQUENCE, REFCODON,
+      VARCODON, REFAA, VARAA, PROTEINLOC
+    )
+
+  n_distinct(all$name)
+
+  all <-
+    left_join(all, predict_coding_variants, by = "name")
+
+
+
+  all <-
+    all %>%
+    mutate(loc_end_comp = loc_len - (loc_start + width - 1)) %>%
+    mutate(boundary_flag = (LOCATION == "coding" &
+      (loc_start < seq_len_min | loc_end_comp < seq_len_min)))
+
+  all <-
+    all %>%
+    dplyr::select(
+      name, CONSEQUENCE, LOCATION, loc, loc_len, loc_start,
+      CDSLOC.start, PROTEINLOC, REFCODON, VARCODON,
+      REFAA, VARAA, boundary_flag, alt_effect
+    ) %>%
+    set_names(c(
+      "name", "consequence", "location", "region", "region_len",
+      "pos_region", "pos_cds", "pos_protein", "ref_codon",
+      "var_codon", "ref_aa", "var_aa", "boundary_flag", "alt_effect"
+    )) %>%
+    rowwise() %>%
+    mutate(pos_protein = str_c(pos_protein, collapse = ":"))
+
+  return(all)
+}
+```
+
+
+```{r}
+all <-
+  annotate_and_predict_variants(variants_dt)
+```
+
+
+## Include base editing variants generated by two or more edits
+
+```{r}
+min_base_changes <- function(target_amino_acid, ref_codon) {
+  # Define a mapping of amino acids to codons
+  amino_acid_mapping <- list(
+    "A" = c("GCT", "GCC", "GCA", "GCG"),
+    "R" = c("CGT", "CGC", "CGA", "CGG", "AGA", "AGG"),
+    "N" = c("AAT", "AAC"),
+    "D" = c("GAT", "GAC"),
+    "C" = c("TGT", "TGC"),
+    "Q" = c("CAA", "CAG"),
+    "E" = c("GAA", "GAG"),
+    "G" = c("GGT", "GGC", "GGA", "GGG"),
+    "H" = c("CAT", "CAC"),
+    "I" = c("ATA"), # "ATT", "ATC", two A>Ts
+    "L" = c("TTA", "TTG", "CTT", "CTC", "CTA", "CTG"),
+    "K" = c("AAA", "AAG"),
+    "M" = c("ATG"),
+    "F" = c("TTT", "TTC"),
+    "P" = c("CCT", "CCC", "CCA", "CCG"),
+    "S" = c("TCT", "TCC", "TCA", "TCG", "AGT", "AGC"),
+    "T" = c("ACT", "ACC", "ACA", "ACG"),
+    "W" = c("TGG"),
+    "Y" = c("TAT", "TAC"),
+    "V" = c("GTT", "GTC", "GTA", "GTG"),
+    "*" = c("TAA", "TAG", "TGA")
+  )
+
+  # Find the reference amino acid corresponding to the reference codon
+  ref_amino_acid <-
+    names(amino_acid_mapping)[which(ref_codon %in% unlist(amino_acid_mapping))]
+
+  # Check if the reference amino acid is valid
+  if (is.null(ref_amino_acid)) {
+    stop("Invalid reference codon.")
+  }
+
+  # Check if the target amino acid is valid
+  if (!(target_amino_acid %in% names(amino_acid_mapping))) {
+    stop("Invalid target amino acid.")
+  }
+
+  # Find the target codons for the given amino acid
+  target_codons <- amino_acid_mapping[[target_amino_acid]]
+
+  # Calculate the number of base changes needed for each target codon
+  base_changes <-
+    sapply(
+      target_codons,
+      function(tc) sum(strsplit(ref_codon, "")[[1]] != strsplit(tc, "")[[1]])
+    )
+
+  # Find the index of the minimum base changes
+  min_index <-
+    which.min(base_changes)
+
+  # Return the variant codon with minimum base changes
+  return(target_codons[min_index])
+}
+
+get_codon_at_aa_position <- function(pos) {
+  start_pos <- pos * 3 - 2
+  end_pos <- pos * 3
+  as.character(subseq(EGFR_seq, start_pos, end_pos))
+}
+
+
+ABE8e_aa_var <-
+  ABE8e_all_dt %>%
+  dplyr::select(Amino.acid.edits) %>%
+  separate_rows(Amino.acid.edits, sep = ";") %>%
+  dplyr::filter(!(Amino.acid.edits %in% c("utr", "None", ""))) %>%
+  dplyr::filter(!str_detect(Amino.acid.edits, "Exon")) %>%
+  separate_wider_regex(Amino.acid.edits,
+    c(
+      ref_aa = "^[A-Za-z]+",
+      pos_protein = "[0-9]+",
+      var_aa = "[A-Za-z]+$"
+    ),
+    cols_remove = F
+  ) %>%
+  dplyr::filter(ref_aa != var_aa)
+
+
+BE4max_aa_var <-
+  BE4max_all_dt %>%
+  dplyr::select(Amino.acid.edits) %>%
+  separate_rows(Amino.acid.edits, sep = ";") %>%
+  dplyr::filter(!(Amino.acid.edits %in% c("utr", "None", ""))) %>%
+  dplyr::filter(!str_detect(Amino.acid.edits, "Exon")) %>%
+  separate_wider_regex(Amino.acid.edits,
+    c(
+      ref_aa = "^[A-Za-z]+",
+      pos_protein = "[0-9]+",
+      var_aa = "[A-Za-z]+$"
+    ),
+    cols_remove = F
+  ) %>%
+  dplyr::filter(ref_aa != var_aa)
+
+aa_map <- c(AMINO_ACID_CODE, "*" = "Ter")
+flipped_aa_map <- setNames(names(aa_map), aa_map)
+
+be_var_dt <-
+  bind_rows(ABE8e_aa_var, BE4max_aa_var) %>%
+  group_by(Amino.acid.edits) %>%
+  dplyr::slice(1) %>%
+  ungroup() %>%
+  mutate(
+    ref_aa = flipped_aa_map[ref_aa],
+    var_aa = flipped_aa_map[var_aa]
+  )
+
+variants_dt0 <-
+  left_join(variants_dt, all, by = "name")
+
+be_var_dt <-
+  left_join(be_var_dt,
+    variants_dt0 %>%
+      filter(pos_protein != "" & type == "snv") %>%
+      dplyr::select(name, ref_aa, pos_protein, var_aa),
+    by = c("ref_aa", "pos_protein", "var_aa")
+  ) %>%
+  dplyr::filter(is.na(name)) %>%
+  mutate(pos_protein = as.numeric(pos_protein)) %>%
+  rowwise() %>%
+  mutate(ref_codon = get_codon_at_aa_position(pos_protein))
+
+be_var_dt <-
+  be_var_dt %>%
+  mutate(var_codon = min_base_changes(var_aa, ref_codon))
+
+be_var_dt <-
+  be_var_dt %>%
+  mutate(
+    last_base_diff =
+      str_sub(ref_codon, 3, 3) != str_sub(var_codon, 3, 3)
+  ) %>%
+  mutate(
+    ref = if_else(last_base_diff, ref_codon, str_sub(ref_codon, 1, 2)),
+    alt = if_else(last_base_diff, var_codon, str_sub(var_codon, 1, 2)),
+    start = ref_locs[pos_protein * 3 - 2],
+    stop = if_else(last_base_diff, start + 2, start + 1)
+  ) %>%
+  mutate(name = paste0("g", start, "_", ref, ">", alt)) %>%
+  mutate(
+    id = name,
+    type = "indel"
+  ) %>%
+  dplyr::select(c("name", "type", "start", "stop", "ref", "alt", "id"))
+rm(variants_dt0)
+
+# remove g55174776_TT>CC since it is the same as g55174776_c.2239_2240delinsCC
+be_var_dt <-
+  be_var_dt %>%
+  filter(name != "g55174776_TT>CC")
+be_var_dt
+```
+
+
+
+
+### Include double base edits variants
+
+```{r}
+variants_dt <-
+  bind_rows(variants_dt, be_var_dt) %>%
+  arrange(start)
+```
+
+
+### Reannotate after inclusion of double base edits variants
+
+```{r}
+all <-
+  annotate_and_predict_variants(variants_dt)
+
+variants_dt <-
+  left_join(variants_dt, all, by = "name")
+
+variants_dt
+```
+```{r}
+table(variants_dt$location)
+```
+
+```{r}
+table(variants_dt$location, variants_dt$type)
+```
+
+
+### Filter out introns
+
+
+```{r}
+variants_dt <-
+  variants_dt %>%
+  filter(location != c("intron"))
+variants_dt
+```
+
+
+
+## Generate synonymous mutations near target Single Nucleotide Variants
+
+
+```{r}
+# Function to split a string into consecutive triplets
+split_into_triplets <- function(s) {
+  n <- nchar(s)
+  if (n %% 3 != 0) {
+    warning("String length is not a multiple of 3. Padding with spaces.")
+    s <- paste0(s, rep(" ", 3 - (n %% 3)))
+  }
+  matrix(strsplit(s, "")[[1]], ncol = 3, byrow = TRUE)
+}
+
+# Split the vector into triplets
+triplets <- split_into_triplets(as.character(EGFR_seq))
+
+# Create a dataframe
+codon_map_df <-
+  tibble(ref_codon = apply(triplets, 1, paste, collapse = "")) %>%
+  mutate(pos_protein = row_number())
+codon_map_df
+```
+
+
+```{r}
+syn_codon_map <-
+  read_delim(syn_codon_path)
+syn_codon_map
+```
+
+```{r}
+codon_map_df <-
+  left_join(codon_map_df, syn_codon_map, by = "ref_codon") %>%
+  mutate(start = ref_locs[pos_protein * 3]) %>%
+  filter(!is.na(ref_aa))
+codon_map_df
+```
+
+
+
+### Split SNVS into spliceSite coding, and intron variants
+
+```{r}
+variants_snv <-
+  variants_dt %>%
+  filter(type == "snv")
+
+variants_snv_coding <-
+  variants_snv %>%
+  filter(location %in% c("coding"))
+```
+
+### Find nonsynomous mutations
+
+```{r}
+get_codon_map <- function(start, name, num_idx) {
+  dis <- abs(start - codon_map_df$start)
+  dis[dis <= 2] <- 10000
+  lowest_indices <- head(order(dis), num_idx)
+
+  bp_dist <- codon_map_df$start[lowest_indices] - start
+
+  dt <- tibble(name = name, dist = bp_dist)
+  dt <- bind_cols(dt, codon_map_df[lowest_indices, ])
+  return(dt)
+}
+
+coding_syn <-
+  map2_df(variants_snv_coding$start,
+    variants_snv_coding$name,
+    get_codon_map,
+    num_idx = 1
+  ) %>%
+  rename(name = "target_name") %>%
+  mutate(name = paste0("g", start, "_", ref, ">", alt)) %>%
+  dplyr::select(
+    name, start, ref, alt, ref,
+    target_name, pos_protein,
+    ref_codon, var_codon, ref_aa, dist
+  )
+```
+
+```{r}
+table(coding_syn$dist)
+```
+
+```{r}
+coding_syn <-
+  coding_syn %>%
+  dplyr::select(-dist) %>%
+  group_by(name) %>%
+  mutate(target_name = paste(target_name, collapse = ";")) %>%
+  dplyr::slice(1)
+coding_syn
+```
+
+
+```{r}
+## Previous code for including intronic variants!!
+
+# variants_snv_intron <-
+#   variants_snv %>%
+#   filter(location %in% c("intron", "spliceSite"))
+
+# mut_pos_dist <- 3
+# intron_syn <-
+#   variants_snv_intron %>%
+#   dplyr::select(name, start, region_len, pos_region) %>%
+#   mutate(pos_region_comp = region_len - pos_region) %>%
+#   mutate(upstream = case_when(
+#     pos_region_comp < 8 ~ F,
+#     pos_region_comp >= 8 ~ T
+#   )) %>%
+#   mutate(
+#     start_syn = if_else(upstream, start + mut_pos_dist, start - mut_pos_dist),
+#     ref = map_chr(
+#       start_syn,
+#       ~ as.character(subseq(hg_genome[["chr7"]], ., .))
+#     )
+#   )
+#
+
+# dup_alternatives <-
+#   intron_syn %>%
+#   filter(start %in% intron_syn$start_syn) %>%
+#   separate(name, into = c("edit", "alt0"), remove = F, sep = ">") %>%
+#   separate(edit, into = c("loc", "ref0"), remove = F, sep = "_") %>%
+#   dplyr::select(name, start, ref0, alt0) %>%
+#   group_by(start) %>%
+#   mutate(bases = paste(alt0, collapse = ",")) %>%
+#   ungroup() %>%
+#   mutate(bases = paste0(bases, ",", ref0)) %>%
+#   rowwise() %>%
+#   mutate(alt_2 = setdiff(c("A", "C", "T", "G"),
+#                          str_split(bases, pattern = ",")[[1]])[1]) %>%
+#   mutate(name_sym = paste0("g", start, "_", ref0, ">", alt_2)) %>%
+#   dplyr::select(name, name_sym, alt_2)
+# dup_alternatives
+
+# intron_syn <-
+#   intron_syn %>%
+#   mutate(alt = case_when(
+#     ref == "G" ~ "A",
+#     ref == "A" ~ "G",
+#     ref == "C" ~ "T",
+#     ref == "T" ~ "C"
+#   )) %>%
+#   dplyr::select(name, start_syn, ref, alt) %>%
+#   dplyr::rename(target_name = "name", start = "start_syn") %>%
+#   mutate(name = paste0("g", start, "_", ref, ">", alt)) %>%
+#   dplyr::select(name, start, ref, alt, target_name) %>%
+#   group_by(name) %>%
+#   mutate(target_name = paste(target_name, collapse = ";")) %>%
+#   dplyr::slice(1)
+
+
+# intron_syn <-
+#   left_join(intron_syn,
+#     dup_alternatives,
+#     by = "name"
+#   ) %>%
+#   mutate(
+#     name = if_else(is.na(name_sym), name, name_sym),
+#     alt = if_else(is.na(alt_2), alt, alt_2)
+#   ) %>%
+#   dplyr::select(-name_sym, -alt_2)
+
+# syn_variants <-
+#   bind_rows(
+#     coding_syn %>%
+#       mutate(location = "coding"),
+#     intron_syn %>%
+#       mutate(
+#         pos_protein = NA,
+#         ref_codon = NA,
+#         var_codon = NA,
+#         ref_aa = NA,
+#         location = "intron"
+#       )
+#   )
+# syn_variants
+```
+
+
+```{r}
+syn_variants <-
+  left_join(
+    coding_syn %>%
+      mutate(location = "coding"),
+    variants_snv %>%
+      dplyr::select(name, id),
+    by = "name"
+  ) %>%
+  mutate(
+    syn_in_target = name %in% variants_dt$name,
+    num_targets = str_count(target_name, ";") + 1
+  )
+syn_variants
+```
+
+```{r}
+syn_target_map <-
+  syn_variants %>%
+  group_by(num_targets, syn_in_target) %>%
+  tally()
+syn_target_map
+```
+
+
+
+```{r}
+syn_variants_long <-
+  syn_variants %>%
+  separate_rows(target_name, sep = ";") %>%
+  dplyr::select(
+    target_name, name, start, ref,
+    alt
+  ) %>%
+  set_names(c(
+    "name", "name_syn", "start_syn",
+    "ref_syn", "alt_syn"
+  ))
+syn_variants_long
+```
+
+
+```{r}
+variants_dt <-
+  left_join(variants_dt, syn_variants_long, by = "name")
+variants_dt
+```
+
+```{r}
+variants_dt <-
+  variants_dt %>%
+  mutate(target_in_syn = if_else(name %in% syn_variants$name, T, F)) %>%
+  mutate(name_target_syn = paste0(name, ":", name_syn)) %>%
+  mutate(
+    clinvar = if_else(grepl("\\b\\d+\\b", id), T, F),
+    cosmic = if_else(grepl("COSV", id), T, F),
+    base_edit = if_else(grepl("g\\d+_[A-Z]+>[A-Z]+", id), T, F)
+  ) %>%
+  dplyr::select(
+    name, id, ref, alt, ref_aa, var_aa, pos_protein,
+    type, consequence, location, name_syn, name_target_syn,
+    target_in_syn, alt_effect,
+    clinvar, cosmic, base_edit, start, stop, start_syn, everything()
+  )  %>%
+  mutate(name_target_syn=if_else(is.na(name_syn), NA, name_target_syn)) 
+variants_dt
+```
+
+
+
+
+### Split variants into target, target_syn, and syn
+
+
+
+```{r}
+variants_snv <-
+  variants_dt %>%
+  filter(!is.na(name_syn))  
+
+
+target_syn_variants <-
+  variants_snv  %>%
+  dplyr::select(name_target_syn, name_syn, name) %>%
+  set_names(c("target_name","name_syn", "name_target"))  %>%
+  mutate( name_target_syn=NA,
+          num_targets=NA,
+          paired_targets_as_syn= NA, 
+          paired_targets_syn_as_syn= NA) %>%
+  dplyr::select(target_name, name_target, name_syn, 
+                name_target_syn,
+                num_targets, paired_targets_as_syn,
+                paired_targets_syn_as_syn )
+target_syn_variants
+
+```
+
+```{r}
+syn_variants_dt <-
+  variants_snv %>%
+  dplyr::select(name_syn, name, name_target_syn) %>%
+  set_names(c("target_name", "name_target", "name_target_syn" ))  %>%
+
+  group_by(target_name)%>% 
+  mutate(name_target = paste(name_target, collapse = ";"),
+         name_target_syn = paste(name_target_syn, collapse = ";")) %>% 
+  dplyr::slice(1)    %>% 
+  mutate( 
+          syn_in_target = target_name %in% variants_dt$name,
+          num_targets = str_count(name_target, ";") + 1
+  )
+
+
+syn_variants_dt_filtered <-
+  syn_variants_dt %>%
+  mutate(target_in_syn=NA,
+        name_syn=NA,
+        paired_targets_as_syn= NA, 
+        paired_targets_syn_as_syn= NA) %>%
+  filter(!(syn_in_target))%>%
+  dplyr::select(target_name, name_target, name_syn,
+                name_target_syn,
+                num_targets, 
+                paired_targets_as_syn, 
+                paired_targets_syn_as_syn )
+
+syn_variants_in_target <-
+    syn_variants_dt %>%
+  filter((syn_in_target)) %>%
+  dplyr::select(-syn_in_target) %>%
+  rename(name_target="paired_targets_as_syn",
+         name_target_syn="paired_targets_syn_as_syn")
+syn_variants_dt_filtered
+```
+
+
+
+```{r}
+variants_dt <-
+  left_join(variants_dt, 
+          syn_variants_in_target %>%
+  rename(target_name="name"),
+  by="name")
+variants_dt
+```
+
+```{r}
+target_variants <-
+  variants_dt %>%
+  dplyr::select(name, name_syn, name_target_syn, paired_targets_as_syn, paired_targets_syn_as_syn, num_targets) %>%
+  set_names(c("target_name", "name_syn", "name_target_syn", "paired_targets_as_syn", "paired_targets_syn_as_syn", "num_targets"))  %>%
+  mutate(name_target=NA)  %>%
+  dplyr::select(target_name, name_target, name_syn,
+                name_target_syn,
+                num_targets, 
+                paired_targets_as_syn, 
+                paired_targets_syn_as_syn )
+  
+target_variants
+```
+
+
+```{r}
+all_variants_paired <- 
+  bind_rows(target_variants, 
+            target_syn_variants, 
+            syn_variants_dt_filtered)
+all_variants_paired 
+```
+
+
+
+### Save to files
+
+```{r}
+write_tsv(
+  all_variants_paired,
+  all_variants_paired_path
+)
+
+write_tsv(
+  variants_dt, variants_table_path)
+```
+
+
+```{r}
+sessionInfo()
+```

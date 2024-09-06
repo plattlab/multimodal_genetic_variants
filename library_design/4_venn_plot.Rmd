@@ -1,0 +1,153 @@
+---
+title: "EGFR Prime Editing Library"
+subtitle: "Part 4: plots"
+author: 
+- name: Rick Farouni
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_notebook:
+    df_print: paged
+    code_folding: show
+    toc: no
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+---
+
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(eulerr))
+
+```
+
+```{r}
+output_dir <- "./output"
+variants_table_path <-
+  file.path(output_dir, "variants_table.tsv")
+```
+
+```{r}
+#A>G (T-C) ABE8e
+# C>T (G-A) BE4max
+variants_dt <-
+  read_tsv(variants_table_path) %>%
+  mutate(ABE8e= if_else(base_edit & ref %in% c("A", "T"), TRUE, FALSE),
+         BE4max= if_else(base_edit & ref %in% c("C", "G"), TRUE, FALSE)) %>%
+  select(-base_edit) 
+```
+
+```{r}
+
+variants_subset <-
+  variants_dt %>%
+  filter(consequence %in% c("nonsynonymous", "nonsense") & type=="snv") %>%
+  select( name:pos_protein, pos_cds, clinvar, cosmic,  ABE8e, BE4max)
+variants_subset
+```
+
+
+
+```{r}
+codon_by_source <-
+  variants_subset%>%
+  select(pos_protein, clinvar, cosmic,  ABE8e, BE4max) %>%
+  group_by(pos_protein) %>%
+  summarize(across(clinvar:BE4max, ~ sum(.))) %>%
+  ungroup() %>%
+  mutate(across(clinvar:BE4max, ~ . !=0)) %>%
+  mutate(pos_protein= as.integer(pos_protein)) %>%
+  arrange(pos_protein)
+codon_by_source 
+```
+
+
+
+```{r}
+complete_codons <- tibble(pos_protein= 1:1211)
+codon_by_source <- 
+  full_join(complete_codons, codon_by_source, by="pos_protein" )
+
+codon_by_source <-
+  codon_by_source %>% 
+  dplyr::mutate(across(clinvar:BE4max, ~replace_na(., FALSE)))  %>% 
+ rename(ClinVar="clinvar", COSMIC="cosmic")
+codon_by_source
+```
+```{r}
+mat <-
+  codon_by_source   %>% 
+ rename(ClinVar="clinvar", COSMIC="cosmic")%>%
+  mutate(all= TRUE) %>%
+  select(-pos_protein)%>%
+  as.matrix.data.frame()
+```
+
+
+```{r}
+fit <- euler(mat)
+fit
+```
+```{r}
+plot(fit, 
+     quantities = TRUE,   
+     labels = list(font = 4))
+```
+
+```{r}
+svg(file="venn_codons.svg")
+plot(fit,
+     quantities = TRUE,
+     labels = list(font = 4))
+dev.off()
+```
+
+
+```{r}
+variants_subset2 <-
+  variants_dt %>%
+  filter(location=="coding") %>%
+  select( clinvar, cosmic,  ABE8e, BE4max) %>% 
+ rename(ClinVar="clinvar", COSMIC="cosmic")
+variants_subset2
+```
+
+
+
+
+```{r}
+mat3 <-
+   variants_subset2 %>%
+  as.matrix.data.frame()
+```
+
+
+```{r}
+fit3 <- euler(mat3)
+fit3
+```
+
+
+
+
+```{r}
+plot(fit3, 
+     quantities = TRUE,   
+     labels = list(font = 4))
+```
+
+```{r}
+svg(file="venn_variants.svg")
+plot(fit3,
+     quantities = TRUE,
+     labels = list(font = 4))
+dev.off()
+```
+
+```{r}
+sessionInfo()
+```

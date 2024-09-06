@@ -1,0 +1,75 @@
+---
+title: "EGFR Prime Editing Library"
+subtitle: "Part 3: postprocess primeDesign output"
+author: 
+- name: Rick Farouni
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_notebook:
+    df_print: paged
+    code_folding: show
+    toc: no
+    toc_float: 
+      collapsed: false
+      smooth_scroll: false
+---
+
+
+
+## Load libraries 
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+```
+
+
+## Load files
+
+
+```{r}
+file_paths <-list.files("./prime_design_output", full.names = T)
+file_paths
+```
+
+```{r}
+pegrna_dt <-
+  map_dfr(file_paths, read_csv)
+pegrna_dt
+```
+
+```{r}
+pegrna_dt<-
+  pegrna_dt %>%
+  filter(gRNA_type=="pegRNA") %>%
+  arrange(Target_name, PBS_length, RTT_length)
+pegrna_dt
+```
+
+```{r}
+output_dir <- "./output"
+write_tsv(pegrna_dt, file.path( output_dir, "pegrna_table.tsv"))
+```
+
+
+```{r}
+ dt <-
+  pegrna_dt %>%
+  group_by(Target_name, PBS_length, RTT_length, Annotation) %>%
+  tally() %>%
+  filter(Annotation=="PAM_disrupted_silent_mutation")
+dt
+```
+
+```{r}
+dt %>%
+  group_by(n)%>%
+  tally()
+```
+
+
+
+
+
+```{r}
+sessionInfo()
+```
